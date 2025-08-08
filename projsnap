@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+import os
+import sys
+import argparse
+from datetime import datetime
+import fnmatch
+
+# --- Configuration ---
+SNAPSHOT_DIR = "_snapshots"
+CONFIG_FILE = os.path.join(SNAPSHOT_DIR, "_snapshot.txt")
+SCRIPT_NAME = os.path.basename(__file__)
+
+# Whitelist of allowed file extensions and specific filenames for CONTENT
+ALLOWED_EXTENSIONS = {
+    "js", "jsx", "ts", "tsx", "html", "css", "scss", "sass", "less", "vue", "svelte", "svg",
+    "py", "go", "java", "rb", "php", "cs", "rs", "m",
+    "json", "yaml", "yml", "xml", "toml", "env", "ini", "mod", "sum",
+    "md", "markdown", "rst", "txt",
+    "sh", "bash", "ps1", "bat",
+    "sql",
+    "c", "cpp", "h", "hpp",
+}
+ALLOWED_FILENAMES = {
+    "Dockerfile", "docker-compose.yml", "Makefile", "LICENSE",
+    ".gitignore", ".prettierrc", ".prettierignore", ".eslintrc", "eslint.config.js",
+    "vite.config.ts", "tsconfig.json", "package.json", "bun.lockb", "pnpm-lock.yaml",
+}
+
+def prompt_to_continue(message, skip=False):
+    """Asks the user for confirmation to proceed, unless skip is True."""
+    print(f"\n{message}")
+    if skip:
+        print("--> Skipping prompt (running in non-interactive mode).")
+        return
+    
+    choice = input("--> Do you want to continue? (y/n): ").lower().strip()
+    if choice != 'y':
+        print("Aborting.")
+        sys.exit(0)
+
+def get_exclusion_patterns(config_path):
+    """Reads and processes exclusion patterns from the config file."""
+    patterns = []
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw_patterns = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+        for p in raw_patterns:
+            if p.startswith('.') and not p.startswith('./'):
+                patterns.append(f"*{p}")
+            else:
+                patterns.append(p)
+        return patterns
+    except FileNotFoundError:
+        print(f"Info: Config file '{config_path}' not found. Using default exclusions only.")
+        return []
+    except Exception as e:
+        print(f"Warning: Could not read config file '{config_path}' due to an error: {e}")
+        return []
+
+def is_binary(filepath):
+    """Checks if a file is likely binary by looking for null bytes."""
+    try:
+        with open(filepath, 'rb') as f:
+            return b'\0' in f.read(1024)
+    except IOError:
+        return False
+
+def generate_tree_structure(paths_list):
+    """Generates a tree-like string representation from a list of paths."""
+    tree = {}
+    for path in sorted(paths_list):
+        parts = os.path.normpath(path).split(os.sep)
+        current_level = tree
+        for part in parts:
+            if part and part != '.':
+                current_level = current_level.setdefault(part, {})
+
+    def build_tree_lines(d, prefix=""):
+        lines = []
+        entries = sorted(d.keys())
+        for i, entry in enumerate(entries):
+            connector = "└── " if i == len(entries) - 1 else "├── "
+            lines.append(f"{prefix}{connector}{entry}")
+            if d[entry]:
+                extension = "    " if i == len(entries) - 1 else "│   "
+                lines.extend(build_tree_lines(d[entry], prefix + extension))
+        return lines
+
+    tree_lines = ["."]
+    tree_lines.extend(build_tree_lines(tree))
+    return "\n".join(tree_lines)
+
+def main():
+    """Main function to orchestrate the snapshot creation."""
+    parser = argparse.ArgumentParser(description="Create a project snapshot.")
+    parser.add_argument("-n", "--name", help="Custom name for the snapshot file.")
+    parser.add_argument("-y", "--yes", action="store_true", help="Skip all confirmation prompts.")
+    args = parser.parse_args()
+
+    config_path = os.path.abspath(CONFIG_FILE)
+    prompt_to_continue(f"Step 1: Using config for exclusions:\n{config_path}", skip=args.yes)
+
+    user_patterns = get_exclusion_patterns(config_path)
+    implicit_patterns = [SNAPSHOT_DIR, SCRIPT_NAME, ".git", "node_modules"]
+    all_patterns = sorted(list(set(user_patterns + implicit_patterns)))
+    prompt_to_continue(f"Step 2: Final exclusion patterns (blacklist has priority):\n  {all_patterns}", skip=args.yes)
+
+    # --- REWORKED SCANNING LOGIC ---
+    paths_for_tree = set()
+    files_for_content = []
+    print("\nStep 3: Scanning project files...")
+
+    for root, dirs, files in os.walk(".", topdown=True):
+        # Add all discovered paths to the set for the tree structure
+        for d in dirs:
+            paths_for_tree.add(os.path.normpath(os.path.join(root, d)))
+        for f in files:
+            paths_for_tree.add(os.path.normpath(os.path.join(root, f)))
+
+        # Prune directories based on exclusion patterns for subsequent traversal
+        dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(os.path.join(root, d), p) or fnmatch.fnmatch(d, p) for p in all_patterns)]
+        
+        # Decide which files to include in the content section
+        for filename in files:
+            filepath = os.path.join(root, filename)
+            
+            # 1. Check whitelist: Is it a candidate for content inclusion?
+            extension = filename.split('.')[-1].lower() if '.' in filename else ''
+            is_candidate = (filename in ALLOWED_FILENAMES or extension in ALLOWED_EXTENSIONS)
+            if not is_candidate:
+                continue
+
+            # 2. Check blacklist: Is the candidate explicitly excluded?
+            is_excluded = any(fnmatch.fnmatch(filepath, p) or fnmatch.fnmatch(filename, p) for p in all_patterns)
+            if not is_excluded:
+                files_for_content.append(os.path.normpath(filepath))
+
+    prompt_to_continue(f"Found {len(paths_for_tree)} total paths for the tree, and {len(files_for_content)} files to include content for.", skip=args.yes)
+
+    print("\nStep 4: Generating snapshot...")
+    if args.name:
+        filename = f"{args.name}.txt"
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"snapshot_{timestamp}.txt"
+    
+    output_path = os.path.join(SNAPSHOT_DIR, filename)
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(f"# Snapshot generated on: {datetime.now().isoformat()}\n")
+            f.write(f"# Exclusion patterns used: {all_patterns}\n\n")
+            
+            f.write("--- PROJECT STRUCTURE ---\n")
+            tree_str = generate_tree_structure(list(paths_for_tree))
+            f.write(tree_str)
+            f.write("\n\n--- FILE CONTENTS ---\n")
+
+
+
+            for filepath in sorted(files_for_content):
+                 f.write("\n\n") # Отступ перед новым файлом
+                 content_to_write = ""
+                 is_empty = False
+
+                 if is_binary(filepath):
+                     content_to_write = "# [Binary file, content not included]\n"
+                 else:
+                     try:
+                         with open(filepath, 'r', encoding='utf-8', errors='ignore') as content_file:
+                             content = content_file.read()
+                             if not content.strip():
+                                 is_empty = True
+                             content_to_write = content
+                     except Exception as e:
+                         content_to_write = f"# [Could not read file: {e}]\n"
+
+                 # Define line style
+                 line_width = 76
+                 header_text = f"# ─── FILE: {filepath} "
+                 
+                 # Write header
+                 f.write(header_text + "─" * (line_width - len(header_text)) + "\n")
+                 
+                 # Write content
+                 if is_empty:
+                     f.write("# [EMPTY FILE]\n")
+                 else:
+                     f.write(content_to_write)
+                 
+                 # Ensure content ends with a newline before the next file starts
+                 if not content_to_write.endswith('\n'):
+                     f.write("\n")
+
+
+    except IOError as e:
+        print(f"Error writing to file: {e}")
+        sys.exit(1)
+
+    print("\n✅ Snapshot created successfully!")
+    print(f"   File: {os.path.abspath(output_path)}")
+
+if __name__ == "__main__":
+    main()
