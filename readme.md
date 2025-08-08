@@ -1,4 +1,4 @@
-P.S - для тех кому надело скидывать файлы в LLM руками, потому что многие расширения не поддерживаются
+(P.S - For those who are tired of uploading files to LLM manually, because many extensions are not supported)
 # Projsnap: Project Snapshot Utility
 
 `projsnap` is a CLI utility that creates a single-file text snapshot of a project. The snapshot includes the complete directory tree and the contents of whitelisted source files, making it ideal for archiving, code reviews, or providing context to AI models.
